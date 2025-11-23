@@ -1,0 +1,321 @@
+import java.sql.*;
+import java.time.LocalDate;
+import java.util.Scanner;
+
+public class CriminalDetentionPortal {
+	static final String DB_URL = "jdbc:mysql://localhost:3306/criminal_db?serverTimezone=UTC&useSSL=false";
+    static final String DB_USER = "root";
+    static final String DB_PASS = ""; // put your password or "" if none
+
+    static Scanner sc = new Scanner(System.in);
+    static int loggedUserId = -1;
+
+    public static void main(String[] args) {
+        System.out.println("=== Criminal Detention Portal ===");
+        try (Connection con = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS)) {
+            System.out.println("Database connected successfully.");
+            ensureTablesExist(con); // safe-guard in case SQL wasn't run
+            while (true) {
+                if (loggedUserId < 0) {
+                    showAuthMenu(con);
+                } else {
+                    showMainMenu(con);
+                }
+            }
+        } catch (SQLException ex) {
+            System.err.println("DB error: " + ex.getMessage());
+            ex.printStackTrace();
+        }
+    }
+
+    // ---------- AUTH ----------
+    static void showAuthMenu(Connection con) throws SQLException {
+        System.out.println("\n1. Login\n2. Register\n3. Exit");
+        System.out.print("Choice: ");
+        String c = sc.nextLine().trim();
+        switch (c) {
+            case "1" -> login(con);
+            case "2" -> register(con);
+            case "3" -> { System.out.println("Exiting."); System.exit(0); }
+            default -> System.out.println("Invalid choice.");
+        }
+    }
+
+    static void login(Connection con) throws SQLException {
+        System.out.print("Username: ");
+        String u = sc.nextLine().trim();
+        System.out.print("Password: ");
+        String p = sc.nextLine().trim();
+        String sql = "SELECT user_id FROM users WHERE username=? AND password=?";
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setString(1, u);
+            ps.setString(2, p);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    loggedUserId = rs.getInt("user_id");
+                    System.out.println("Login successful. Welcome, " + u + "!");
+                } else {
+                    System.out.println("Login failed. Check credentials.");
+                }
+            }
+        }
+    }
+
+    static void register(Connection con) throws SQLException {
+        System.out.print("Choose username: ");
+        String u = sc.nextLine().trim();
+        System.out.print("Choose password: ");
+        String p = sc.nextLine().trim();
+        String sql = "INSERT INTO users(username, password) VALUES (?, ?)";
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setString(1, u);
+            ps.setString(2, p);
+            ps.executeUpdate();
+            System.out.println("Registration complete. You may login now.");
+        } catch (SQLException ex) {
+            System.out.println("Registration error (maybe username exists).");
+        }
+    }
+
+    // ---------- MAIN MENU ----------
+    static void showMainMenu(Connection con) throws SQLException {
+        System.out.println("\n----- Main Menu -----");
+        System.out.println("1. Add Prisoner (personal + crime)");
+        System.out.println("2. View All Prisoners");
+        System.out.println("3. Update Prisoner");
+        System.out.println("4. Delete Prisoner");
+        System.out.println("5. Record OUT / IN (In-Out register)");
+        System.out.println("6. Release Generator (Due today or past)");
+        System.out.println("7. Reports - Day-wise / Month-wise Release");
+        System.out.println("8. Logout");
+        System.out.println("9. Exit");
+        System.out.print("Choice: ");
+        String ch = sc.nextLine().trim();
+        switch (ch) {
+            case "1" -> addPrisoner(con);
+            case "2" -> viewPrisoners(con);
+            case "3" -> updatePrisoner(con);
+            case "4" -> deletePrisoner(con);
+            case "5" -> recordInOut(con);
+            case "6" -> automatedReleaseList(con);
+            case "7" -> releaseReports(con);
+            case "8" -> { loggedUserId = -1; System.out.println("Logged out."); }
+            case "9" -> { System.out.println("Exiting."); System.exit(0); }
+            default -> System.out.println("Invalid choice.");
+        }
+    }
+
+    // ---------- PRISONER CRUD ----------
+    static void addPrisoner(Connection con) throws SQLException {
+        try {
+            System.out.print("Name: ");
+            String name = sc.nextLine().trim();
+            System.out.print("Age: ");
+            int age = Integer.parseInt(sc.nextLine().trim());
+            System.out.print("Gender: ");
+            String gender = sc.nextLine().trim();
+            LocalDate dateIn = LocalDate.now();
+            System.out.print("Sentence (years): ");
+            int years = Integer.parseInt(sc.nextLine().trim());
+            LocalDate releaseDate = dateIn.plusYears(years);
+
+            String psql = "INSERT INTO prisoners(name, age, gender, date_in, sentence_years, release_date) VALUES (?, ?, ?, ?, ?, ?)";
+            try (PreparedStatement ps = con.prepareStatement(psql, Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1, name);
+                ps.setInt(2, age);
+                ps.setString(3, gender);
+                ps.setDate(4, Date.valueOf(dateIn));
+                ps.setInt(5, years);
+                ps.setDate(6, Date.valueOf(releaseDate));
+                ps.executeUpdate();
+                try (ResultSet g = ps.getGeneratedKeys()) {
+                    if (g.next()) {
+                        int pid = g.getInt(1);
+                        // insert crime details
+                        System.out.print("Crime Type: ");
+                        String ctype = sc.nextLine().trim();
+                        System.out.print("Crime Description: ");
+                        String cdesc = sc.nextLine().trim();
+                        String csql = "INSERT INTO crime_details(prisoner_id, crime_type, crime_description) VALUES (?, ?, ?)";
+                        try (PreparedStatement cps = con.prepareStatement(csql)) {
+                            cps.setInt(1, pid);
+                            cps.setString(2, ctype);
+                            cps.setString(3, cdesc);
+                            cps.executeUpdate();
+                        }
+                        System.out.println("Prisoner added (ID: " + pid + "). Release date: " + releaseDate);
+                    }
+                }
+            }
+        } catch (NumberFormatException e) {
+            System.out.println("Invalid number input. Aborting.");
+        }
+    }
+
+    static void viewPrisoners(Connection con) throws SQLException {
+        String sql = "SELECT p.prisoner_id, p.name, p.age, p.gender, p.date_in, p.sentence_years, p.release_date, c.crime_type, c.crime_description "
+                   + "FROM prisoners p LEFT JOIN crime_details c ON p.prisoner_id = c.prisoner_id ORDER BY p.prisoner_id";
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            System.out.printf("%-4s %-20s %-4s %-6s %-12s %-6s %-12s %-15s%n",
+                    "ID","Name","Age","Gender","DateIn","Years","ReleaseDate","CrimeType");
+            while (rs.next()) {
+                System.out.printf("%-4d %-20s %-4d %-6s %-12s %-6d %-12s %-15s%n",
+                    rs.getInt("prisoner_id"),
+                    rs.getString("name"),
+                    rs.getInt("age"),
+                    rs.getString("gender"),
+                    rs.getDate("date_in"),
+                    rs.getInt("sentence_years"),
+                    rs.getDate("release_date"),
+                    rs.getString("crime_type"));
+            }
+        }
+    }
+
+    static void updatePrisoner(Connection con) throws SQLException {
+        System.out.print("Enter prisoner ID to update: ");
+        int id = Integer.parseInt(sc.nextLine().trim());
+        // Update personal
+        System.out.print("New name (or press Enter to skip): ");
+        String name = sc.nextLine();
+        System.out.print("New age (or press Enter to skip): ");
+        String ageStr = sc.nextLine();
+        System.out.print("New gender (or press Enter to skip): ");
+        String gender = sc.nextLine();
+
+        if (!name.isEmpty()) {
+            try (PreparedStatement ps = con.prepareStatement("UPDATE prisoners SET name=? WHERE prisoner_id=?")) {
+                ps.setString(1, name); ps.setInt(2, id); ps.executeUpdate();
+            }
+        }
+        if (!ageStr.isEmpty()) {
+            try (PreparedStatement ps = con.prepareStatement("UPDATE prisoners SET age=? WHERE prisoner_id=?")) {
+                ps.setInt(1, Integer.parseInt(ageStr)); ps.setInt(2, id); ps.executeUpdate();
+            }
+        }
+        if (!gender.isEmpty()) {
+            try (PreparedStatement ps = con.prepareStatement("UPDATE prisoners SET gender=? WHERE prisoner_id=?")) {
+                ps.setString(1, gender); ps.setInt(2, id); ps.executeUpdate();
+            }
+        }
+        // Update crime (simple approach: update first crime record)
+        System.out.print("Update crime type (or Enter to skip): ");
+        String ctype = sc.nextLine();
+        if (!ctype.isEmpty()) {
+            System.out.print("Update crime description: ");
+            String cdesc = sc.nextLine();
+            try (PreparedStatement ps = con.prepareStatement("UPDATE crime_details SET crime_type=?, crime_description=? WHERE prisoner_id=?")) {
+                ps.setString(1, ctype); ps.setString(2, cdesc); ps.setInt(3, id); 
+                int rows = ps.executeUpdate();
+                if (rows == 0) {
+                    // insert if not exists
+                    try (PreparedStatement ins = con.prepareStatement("INSERT INTO crime_details(prisoner_id,crime_type,crime_description) VALUES(?,?,?)")) {
+                        ins.setInt(1, id); ins.setString(2, ctype); ins.setString(3, cdesc); ins.executeUpdate();
+                    }
+                }
+            }
+        }
+        System.out.println("Update finished.");
+    }
+
+    static void deletePrisoner(Connection con) throws SQLException {
+        System.out.print("Enter prisoner ID to delete: ");
+        int id = Integer.parseInt(sc.nextLine().trim());
+        try (PreparedStatement ps = con.prepareStatement("DELETE FROM prisoners WHERE prisoner_id=?")) {
+            ps.setInt(1, id);
+            int rows = ps.executeUpdate();
+            System.out.println(rows > 0 ? "Prisoner deleted." : "No prisoner found with that ID.");
+        }
+    }
+
+    // ---------- IN/OUT ----------
+    static void recordInOut(Connection con) throws SQLException {
+        System.out.print("Enter prisoner ID: ");
+        int id = Integer.parseInt(sc.nextLine().trim());
+        System.out.print("Type (OUT / IN): ");
+        String type = sc.nextLine().trim().toUpperCase();
+        if (!(type.equals("OUT") || type.equals("IN"))) { System.out.println("Invalid type."); return; }
+        System.out.print("Action Date (YYYY-MM-DD) or Enter for today: ");
+        String dateStr = sc.nextLine().trim();
+        LocalDate date = dateStr.isEmpty() ? LocalDate.now() : LocalDate.parse(dateStr);
+        System.out.print("Purpose: ");
+        String purpose = sc.nextLine();
+        String sql = "INSERT INTO in_out_register(prisoner_id, type_enum, action_date, purpose) VALUES (?, ?, ?, ?)";
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setInt(1, id);
+            ps.setString(2, type);
+            ps.setDate(3, Date.valueOf(date));
+            ps.setString(4, purpose);
+            ps.executeUpdate();
+            System.out.println("Recorded " + type + " for prisoner " + id);
+        }
+    }
+
+    // ---------- RELEASE & REPORT ----------
+    static void automatedReleaseList(Connection con) throws SQLException {
+        String sql = "SELECT prisoner_id, name, release_date FROM prisoners WHERE release_date <= CURDATE() ORDER BY release_date";
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            System.out.println("\n--- Release List (due on/before today) ---");
+            boolean found = false;
+            while (rs.next()) {
+                found = true;
+                System.out.printf("ID:%d | Name:%s | Release:%s%n",
+                        rs.getInt("prisoner_id"),
+                        rs.getString("name"),
+                        rs.getDate("release_date"));
+            }
+            if (!found) System.out.println("No prisoners scheduled for release today or earlier.");
+        }
+    }
+
+    static void releaseReports(Connection con) throws SQLException {
+        System.out.println("1. Day-wise report\n2. Month-wise report");
+        System.out.print("Choice: ");
+        String choice = sc.nextLine().trim();
+        if (choice.equals("1")) {
+            System.out.print("Enter date (YYYY-MM-DD): ");
+            LocalDate d = LocalDate.parse(sc.nextLine().trim());
+            String sql = "SELECT prisoner_id, name, release_date FROM prisoners WHERE release_date = ?";
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setDate(1, Date.valueOf(d));
+                try (ResultSet rs = ps.executeQuery()) {
+                    System.out.println("--- Day-wise Releases for " + d + " ---");
+                    while (rs.next()) {
+                        System.out.printf("ID:%d | Name:%s | Release:%s%n", rs.getInt("prisoner_id"), rs.getString("name"), rs.getDate("release_date"));
+                    }
+                }
+            }
+        } else if (choice.equals("2")) {
+            System.out.print("Enter month number (1-12): ");
+            int m = Integer.parseInt(sc.nextLine().trim());
+            System.out.print("Enter year (e.g., 2025): ");
+            int y = Integer.parseInt(sc.nextLine().trim());
+            String sql = "SELECT prisoner_id, name, release_date FROM prisoners WHERE MONTH(release_date)=? AND YEAR(release_date)=?";
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setInt(1, m); ps.setInt(2, y);
+                try (ResultSet rs = ps.executeQuery()) {
+                    System.out.println("--- Releases for " + m + "/" + y + " ---");
+                    while (rs.next()) {
+                        System.out.printf("ID:%d | Name:%s | Release:%s%n", rs.getInt("prisoner_id"), rs.getString("name"), rs.getDate("release_date"));
+                    }
+                }
+            }
+        } else {
+            System.out.println("Invalid choice.");
+        }
+    }
+
+    // ---------- Helper: ensure tables exist (safety) ----------
+    static void ensureTablesExist(Connection con) throws SQLException {
+        // (The SQL run earlier should have created them. But keep a safety check here)
+        String[] create = {
+            "CREATE TABLE IF NOT EXISTS users (user_id INT AUTO_INCREMENT PRIMARY KEY, username VARCHAR(50) UNIQUE NOT NULL, password VARCHAR(100) NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS prisoners (prisoner_id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(150) NOT NULL, age INT, gender VARCHAR(10), date_in DATE, sentence_years INT, release_date DATE)",
+            "CREATE TABLE IF NOT EXISTS crime_details (crime_id INT AUTO_INCREMENT PRIMARY KEY, prisoner_id INT NOT NULL, crime_type VARCHAR(200), crime_description TEXT, FOREIGN KEY (prisoner_id) REFERENCES prisoners(prisoner_id) ON DELETE CASCADE)",
+            "CREATE TABLE IF NOT EXISTS in_out_register (io_id INT AUTO_INCREMENT PRIMARY KEY, prisoner_id INT, type_enum ENUM('OUT','IN') NOT NULL, action_date DATE, purpose VARCHAR(255), FOREIGN KEY (prisoner_id) REFERENCES prisoners(prisoner_id) ON DELETE CASCADE)"
+        };
+        try (Statement st = con.createStatement()) {
+            for (String s : create) st.execute(s);
+        }
+    }
+}
